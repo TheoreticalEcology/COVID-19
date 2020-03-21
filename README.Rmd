@@ -1,0 +1,102 @@
+---
+title: "A state-space model for COVID-19"
+author: "Florian Hartig"
+date: "3/21/2020"
+output: html_document
+---
+
+```{r}
+simulateData<- function(tMax = 60, observationProb = 0.5, R0 = 3, mort = 0.02){
+  
+  x = matrix(nrow = tMax, ncol = 21)
+  x[1,] = c(15, rep(0, 20))
+  
+  for(t in 1:(tMax-1)){
+    x[t+1,2:21] = x[t, 1:20]
+    x[t+1,1] = rpois(1, sum(x[t,4:15]) * R0 / 12)
+  }
+  deaths = sapply(x[,21], function(x) rbinom(1, x, mort))
+  cumInfected = cumsum(x[,1])
+  cumObs = sapply(cumInfected, function(x) rbinom(1, x, observationProb))
+  return(list(cumObs=cumObs, 
+              cumInfected = cumInfected, 
+              deaths = deaths, 
+              cumDeaths = cumsum(deaths),
+              tMax = tMax, 
+              x = x))
+}
+
+out = simulateData()
+
+plot(log10(out$cumObs), type = "l", las = 2, xlab = "day", ylab = "counts")
+lines(log10(cumsum(out$cumDeaths)), col = "red")
+```
+
+# Fitting a SSM for the outbreak
+
+## The Jags model
+
+```{r}
+modelCode <- "
+   model{
+      cumInfected[1] = 0 
+      for(t in 1:(tMax-1)){
+          # summaries 
+         cumInfected[t+1] = cumInfected[t] + x[t,1]
+         cumObs[t+1] ~ dbinom(observationProb, cumInfected[t+1])
+         infected[t] = sum(x[t,] )
+         infectious[t] = sum(x[t,4:15])
+          # virus population model
+         x[t+1,2:21] = x[t,1:20]
+         x[t+1,1] ~ dpois(infectious[t] * R0 / 12)
+         deaths[t] ~ dbinom(mort, x[t,21])
+      }
+      R0 ~ dgamma(0.01, 0.01)
+      mort ~ dbeta(0.01,0.9)
+      observationProb ~ dbeta(0.5,0.5)
+      for (i in 1:21){
+        x[1,i] ~ dpois(1)
+      }
+
+}"
+
+```
+
+
+
+
+## Preparing the data
+
+Technical comment here: when fitting SSMs in Jags, it is usually essential to set inits for the states (infections over the 60 days), because otherwise, Jags makes a guess, and the likelihood for this guess is often so low that the sampler decides that this guess is simply impossible, and stops immediately.
+
+In this case, it took me a while to figure out how to do this. It didn't work to set starting values alone, and it also didn't work to set the entire x, because Jags doesn't like to set inits on values that are logically connected. What worked, however, was to extract a possible x from the simulation, and set all logically values to NA. 
+
+```{r}
+data = out[c(1,3,5)]
+start = out$x
+start[,2:21] = NA
+inits.fn <- function() list( x = start)
+```
+
+## Fitting the model
+
+```{r}
+library(R2jags)
+jags.fit <- jags(data=data, 
+                 inits=inits.fn, 
+                 parameters.to.save=c("R0","observationProb","mort", "cumInfected"), 
+                 model.file=textConnection(modelCode),
+                 n.chains=3, 
+                 n.iter=12000,
+                 n.burnin=2000,
+                 DIC=F)
+
+```
+
+
+```{r}
+plot(jags.fit)
+print(jags.fit)
+```
+
+
